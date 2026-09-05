@@ -10,6 +10,7 @@ exact spot that caused it, not just "somewhere in this file".
 
 from __future__ import annotations
 
+import calendar
 from dataclasses import dataclass
 
 
@@ -205,6 +206,63 @@ def escape_text(value: str) -> str:
     )
 
 
+def _validate_date_time(
+    prop_name: str, value: str, value_pos: list[_Pos], line_pos: list[_Pos]
+) -> None:
+    """Check a DTSTART/DTEND value against RFC 5545's DATE / DATE-TIME grammar.
+
+    DATE is YYYYMMDD; DATE-TIME is DATE "T" HHMMSS, optionally suffixed
+    with "Z" for UTC. This only confirms the value names a real calendar
+    date (and, for DATE-TIME, a real time of day) - it doesn't resolve a
+    TZID against a VTIMEZONE, that's a separate piece of work.
+    """
+
+    def fail(msg: str, at: int) -> None:
+        p = value_pos[min(at, len(value_pos) - 1)] if value_pos else line_pos[-1]
+        raise ICSParseError(f"{prop_name}: {msg}", p.line, p.column)
+
+    if not value:
+        fail("value is empty", 0)
+
+    is_utc = value.endswith("Z")
+    body = value[:-1] if is_utc else value
+
+    if "T" in body:
+        date_part, _, time_part = body.partition("T")
+    else:
+        date_part, time_part = body, None
+        if is_utc:
+            fail("'Z' suffix needs a time-of-day (DATE-TIME), not a bare DATE", 0)
+
+    if len(date_part) != 8 or not date_part.isdigit():
+        fail("date must be 8 digits (YYYYMMDD)", 0)
+
+    year = int(date_part[0:4])
+    month = int(date_part[4:6])
+    day = int(date_part[6:8])
+    if not 1 <= month <= 12:
+        fail(f"month {month:02d} is not between 01 and 12", 4)
+    try:
+        days_in_month = calendar.monthrange(year, month)[1]
+    except ValueError:
+        fail(f"year {year:04d} is out of range (must be 0001-9999)", 0)
+    if not 1 <= day <= days_in_month:
+        fail(f"day {day:02d} is not valid for {year:04d}-{month:02d}", 6)
+
+    if time_part is not None:
+        if len(time_part) != 6 or not time_part.isdigit():
+            fail("time-of-day must be 6 digits (HHMMSS)", 9)
+        hour = int(time_part[0:2])
+        minute = int(time_part[2:4])
+        second = int(time_part[4:6])
+        if not 0 <= hour <= 23:
+            fail(f"hour {hour:02d} is not between 00 and 23", 9)
+        if not 0 <= minute <= 59:
+            fail(f"minute {minute:02d} is not between 00 and 59", 11)
+        if not 0 <= second <= 60:  # 60 is allowed, for leap seconds
+            fail(f"second {second:02d} is not between 00 and 60", 13)
+
+
 def parse_calendar(text: str) -> list[Event]:
     content, positions = _unfold(text)
     logical_lines = _split_logical_lines(content, positions)
@@ -253,8 +311,10 @@ def parse_calendar(text: str) -> list[Event]:
         elif upper == "SUMMARY":
             current.summary = unescape_text(raw_value, value_pos)
         elif upper == "DTSTART":
+            _validate_date_time("DTSTART", raw_value, value_pos, line_pos)
             current.start = raw_value
         elif upper == "DTEND":
+            _validate_date_time("DTEND", raw_value, value_pos, line_pos)
             current.end = raw_value
         elif upper == "LOCATION":
             current.location = unescape_text(raw_value, value_pos)

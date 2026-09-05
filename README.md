@@ -73,6 +73,12 @@ or a block that was never closed:
 events.ics:22:1: unclosed BEGIN:VEVENT, reached end of file
 ```
 
+or a `DTSTART`/`DTEND` that isn't a real calendar date:
+
+```
+events.ics:9:9: DTSTART: day 31 is not valid for 2026-04
+```
+
 The parser tracks the position of every character through RFC 5545's
 line-folding (long lines split across multiple physical lines with a
 leading space) so the reported line and column point at the actual
@@ -83,9 +89,9 @@ buffer.
 
 This is an early skeleton. It handles the fields listed above and
 detects structural errors (bad property syntax, mismatched
-`BEGIN`/`END`, bad escapes). It does not yet:
+`BEGIN`/`END`, bad escapes, malformed `DTSTART`/`DTEND` values). It
+does not yet:
 
-- validate that `DTSTART`/`DTEND` values are well-formed date-times
 - fold long output lines back to the 75-octet limit RFC 5545 expects
 - understand `RRULE` (recurring events), `VTIMEZONE`, or `VALARM`
 
