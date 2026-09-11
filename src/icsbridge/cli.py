@@ -12,7 +12,7 @@ import io
 import sys
 from pathlib import Path
 
-from .parser import ICSParseError, escape_text, parse_calendar
+from .parser import ICSParseError, escape_text, fold_line, parse_calendar
 
 FIELDS = ["uid", "summary", "start", "end", "location", "description"]
 REQUIRED_CSV_FIELDS = ("uid", "summary", "start")
@@ -64,7 +64,7 @@ def csv_to_ics(text: str, prodid: str = "-//ics-csv-bridge//EN") -> str:
             f"CSV header is missing required column(s): {', '.join(missing)}"
         )
 
-    lines = ["BEGIN:VCALENDAR", "VERSION:2.0", f"PRODID:{prodid}"]
+    lines = ["BEGIN:VCALENDAR", "VERSION:2.0", fold_line(f"PRODID:{prodid}")]
     for row_number, row in enumerate(reader, start=2):  # header is row 1
         uid = (row.get("uid") or "").strip()
         summary = (row.get("summary") or "").strip()
@@ -75,19 +75,19 @@ def csv_to_ics(text: str, prodid: str = "-//ics-csv-bridge//EN") -> str:
             raise CsvFormatError(f"row {row_number}: 'start' is required but empty")
 
         lines.append("BEGIN:VEVENT")
-        lines.append(f"UID:{escape_text(uid)}")
-        lines.append(f"SUMMARY:{escape_text(summary)}")
-        lines.append(f"DTSTART:{start}")
+        lines.append(fold_line(f"UID:{escape_text(uid)}"))
+        lines.append(fold_line(f"SUMMARY:{escape_text(summary)}"))
+        lines.append(fold_line(f"DTSTART:{start}"))
 
         end = (row.get("end") or "").strip()
         if end:
-            lines.append(f"DTEND:{end}")
+            lines.append(fold_line(f"DTEND:{end}"))
         location = (row.get("location") or "").strip()
         if location:
-            lines.append(f"LOCATION:{escape_text(location)}")
+            lines.append(fold_line(f"LOCATION:{escape_text(location)}"))
         description = (row.get("description") or "").strip()
         if description:
-            lines.append(f"DESCRIPTION:{escape_text(description)}")
+            lines.append(fold_line(f"DESCRIPTION:{escape_text(description)}"))
 
         lines.append("END:VEVENT")
 

@@ -92,7 +92,6 @@ detects structural errors (bad property syntax, mismatched
 `BEGIN`/`END`, bad escapes, malformed `DTSTART`/`DTEND` values). It
 does not yet:
 
-- fold long output lines back to the 75-octet limit RFC 5545 expects
 - understand `RRULE` (recurring events), `VTIMEZONE`, or `VALARM`
 
 See the commit history for what's been added since this was written.

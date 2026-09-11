@@ -206,6 +206,33 @@ def escape_text(value: str) -> str:
     )
 
 
+def fold_line(line: str, limit: int = 75) -> str:
+    """Fold one unfolded content line to RFC 5545's 75-octet-per-line limit.
+
+    The limit is on octets, not characters, so this works in UTF-8 bytes
+    and backs off a split point that would fall inside a multi-byte
+    character. Continuation lines start with a single space, which
+    itself counts against the 75, so each one after the first can only
+    hold 74 octets of content.
+    """
+    encoded = line.encode("utf-8")
+    if len(encoded) <= limit:
+        return line
+
+    chunks: list[str] = []
+    start = 0
+    n = len(encoded)
+    chunk_limit = limit
+    while start < n:
+        end = min(start + chunk_limit, n)
+        while end > start and (encoded[end] & 0xC0) == 0x80:
+            end -= 1
+        chunks.append(encoded[start:end].decode("utf-8"))
+        start = end
+        chunk_limit = limit - 1  # leave room for the leading space
+    return "\r\n ".join(chunks)
+
+
 def _validate_date_time(
     prop_name: str, value: str, value_pos: list[_Pos], line_pos: list[_Pos]
 ) -> None:
