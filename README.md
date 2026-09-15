@@ -79,6 +79,13 @@ or a `DTSTART`/`DTEND` that isn't a real calendar date:
 events.ics:9:9: DTSTART: day 31 is not valid for 2026-04
 ```
 
+or a `DTSTART;TZID=...` that names a timezone with no matching
+`VTIMEZONE` block:
+
+```
+events.ics:14:23: DTSTART: TZID 'Europe/Paris' is not defined by any VTIMEZONE in this file (VTIMEZONE blocks must come before the VEVENTs that use them)
+```
+
 The parser tracks the position of every character through RFC 5545's
 line-folding (long lines split across multiple physical lines with a
 leading space) so the reported line and column point at the actual
@@ -89,10 +96,20 @@ buffer.
 
 This is an early skeleton. It handles the fields listed above and
 detects structural errors (bad property syntax, mismatched
-`BEGIN`/`END`, bad escapes, malformed `DTSTART`/`DTEND` values). It
-does not yet:
+`BEGIN`/`END`, bad escapes, malformed `DTSTART`/`DTEND` values).
 
-- understand `RRULE` (recurring events), `VTIMEZONE`, or `VALARM`
+`VTIMEZONE` blocks are checked, not just skipped: each one needs a
+`TZID` and at least one `STANDARD`/`DAYLIGHT` sub-component with a
+valid UTC offset, and a `DTSTART`/`DTEND` with a `TZID` param has to
+reference one that was actually declared. `VTIMEZONE` blocks must
+come before the events that reference them, since parsing is a single
+pass over the file. The offsets themselves aren't resolved against a
+date yet (a `DTSTART` in local time is passed through as-is), which is
+tied up with the next item below.
+
+It does not yet:
+
+- understand `RRULE` (recurring events) or `VALARM`
 
 See the commit history for what's been added since this was written.
 

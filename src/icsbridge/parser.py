@@ -109,11 +109,14 @@ def _split_logical_lines(
 
 def _parse_property(
     text: str, pos: list[_Pos]
-) -> tuple[str, dict[str, str], str, list[_Pos]]:
+) -> tuple[str, dict[str, tuple[str, _Pos]], str, list[_Pos]]:
     """Split one unfolded logical line into (name, params, raw_value, value_pos).
 
     raw_value is still escaped (backslash sequences intact); callers
     decide whether to unescape it, since not every property is TEXT.
+    Each param maps to (value, position of the value's first character),
+    so callers that reject a bad param value (e.g. an undefined TZID)
+    can point at it instead of at the start of the line.
     """
     n = len(text)
     i = 0
@@ -127,7 +130,7 @@ def _parse_property(
         raise ICSParseError("property line has no ':' separator", p.line, p.column + 1)
     name = text[:i]
 
-    params: dict[str, str] = {}
+    params: dict[str, tuple[str, _Pos]] = {}
     while i < n and text[i] == ";":
         i += 1
         start = i
@@ -147,13 +150,15 @@ def _parse_property(
                 p = pos[start - 1]
                 raise ICSParseError("unterminated quoted parameter value", p.line, p.column)
             pvalue = text[start:i]
+            pvalue_pos = pos[start] if start < n else pos[-1]
             i += 1  # skip closing quote
         else:
             start = i
             while i < n and text[i] not in (";", ":"):
                 i += 1
             pvalue = text[start:i]
-        params[pname] = pvalue
+            pvalue_pos = pos[start] if start < n else pos[-1]
+        params[pname] = (pvalue, pvalue_pos)
 
     if i >= n or text[i] != ":":
         p = pos[i] if i < n else pos[-1]
@@ -290,6 +295,65 @@ def _validate_date_time(
             fail(f"second {second:02d} is not between 00 and 60", 13)
 
 
+def _validate_utc_offset(
+    prop_name: str, value: str, value_pos: list[_Pos], line_pos: list[_Pos]
+) -> None:
+    """Check a TZOFFSETFROM/TZOFFSETTO value against RFC 5545's utc-offset grammar.
+
+    utc-offset = ("+" / "-") time-hour time-minute [time-second]
+    e.g. "-0500", "+0530", "+013000".
+    """
+
+    def fail(msg: str, at: int = 0) -> None:
+        p = value_pos[min(at, len(value_pos) - 1)] if value_pos else line_pos[-1]
+        raise ICSParseError(f"{prop_name}: {msg}", p.line, p.column)
+
+    if not value:
+        fail("value is empty")
+    if value[0] not in ("+", "-"):
+        fail("utc-offset must start with '+' or '-'")
+
+    digits = value[1:]
+    if len(digits) not in (4, 6) or not digits.isdigit():
+        fail("utc-offset must be +/-HHMM or +/-HHMMSS")
+
+    hour = int(digits[0:2])
+    minute = int(digits[2:4])
+    if hour > 23:
+        fail(f"offset hour {hour:02d} is not between 00 and 23", 1)
+    if minute > 59:
+        fail(f"offset minute {minute:02d} is not between 00 and 59", 3)
+    if len(digits) == 6:
+        second = int(digits[4:6])
+        if second > 59:
+            fail(f"offset second {second:02d} is not between 00 and 59", 5)
+
+
+def _resolve_tzid_param(
+    prop_name: str,
+    params: dict[str, tuple[str, _Pos]],
+    timezones: set[str],
+) -> str | None:
+    """Look up a DTSTART/DTEND TZID param against the VTIMEZONEs seen so far.
+
+    VTIMEZONE blocks must appear before any VEVENT that references them.
+    RFC 5545 doesn't spell that ordering out as a MUST, but every real
+    producer writes it that way, and this parser makes a single pass, so
+    a TZID that shows up only later in the file is reported as undefined.
+    """
+    if "TZID" not in params:
+        return None
+    tzid, tz_pos = params["TZID"]
+    if tzid not in timezones:
+        raise ICSParseError(
+            f"{prop_name}: TZID '{tzid}' is not defined by any VTIMEZONE in "
+            "this file (VTIMEZONE blocks must come before the VEVENTs that use them)",
+            tz_pos.line,
+            tz_pos.column,
+        )
+    return tzid
+
+
 def parse_calendar(text: str) -> list[Event]:
     content, positions = _unfold(text)
     logical_lines = _split_logical_lines(content, positions)
@@ -300,11 +364,19 @@ def parse_calendar(text: str) -> list[Event]:
     stack: list[str] = []
     last_line = 1
 
+    # VTIMEZONE state. RFC 5545 requires a TZID and at least one
+    # STANDARD/DAYLIGHT sub-component per VTIMEZONE; these track the block
+    # currently being parsed so END:VTIMEZONE can check both were present.
+    timezones: set[str] = set()
+    pending_tzid: str | None = None
+    pending_tzid_line = 0
+    pending_tz_has_component = False
+
     for line_text, line_pos in logical_lines:
         if not line_text:
             continue
         last_line = line_pos[0].line
-        name, _params, raw_value, value_pos = _parse_property(line_text, line_pos)
+        name, params, raw_value, value_pos = _parse_property(line_text, line_pos)
         upper = name.upper()
 
         if upper == "BEGIN":
@@ -314,6 +386,16 @@ def parse_calendar(text: str) -> list[Event]:
                 seen_vcalendar = True
             elif block == "VEVENT":
                 current = Event(line=line_pos[0].line)
+            elif block == "VTIMEZONE":
+                pending_tzid = None
+                pending_tzid_line = line_pos[0].line
+                pending_tz_has_component = False
+            elif (
+                block in ("STANDARD", "DAYLIGHT")
+                and len(stack) >= 2
+                and stack[-2] == "VTIMEZONE"
+            ):
+                pending_tz_has_component = True
             continue
 
         if upper == "END":
@@ -328,9 +410,45 @@ def parse_calendar(text: str) -> list[Event]:
             if block == "VEVENT" and current is not None:
                 events.append(current)
                 current = None
+            elif block == "VTIMEZONE":
+                if pending_tzid is None:
+                    raise ICSParseError(
+                        "VTIMEZONE has no TZID property", pending_tzid_line, 1
+                    )
+                if not pending_tz_has_component:
+                    raise ICSParseError(
+                        "VTIMEZONE has no STANDARD or DAYLIGHT component",
+                        pending_tzid_line,
+                        1,
+                    )
+                if pending_tzid in timezones:
+                    raise ICSParseError(
+                        f"duplicate VTIMEZONE for TZID '{pending_tzid}'",
+                        pending_tzid_line,
+                        1,
+                    )
+                timezones.add(pending_tzid)
+                pending_tzid = None
             continue
 
         if current is None:
+            if stack and stack[-1] == "VTIMEZONE" and upper == "TZID":
+                if pending_tzid is not None:
+                    p = line_pos[0]
+                    raise ICSParseError(
+                        "VTIMEZONE has more than one TZID property", p.line, p.column
+                    )
+                tzid = unescape_text(raw_value, value_pos).strip()
+                if not tzid:
+                    p = line_pos[0]
+                    raise ICSParseError("TZID value is empty", p.line, p.column)
+                pending_tzid = tzid
+            elif (
+                stack
+                and stack[-1] in ("STANDARD", "DAYLIGHT")
+                and upper in ("TZOFFSETFROM", "TZOFFSETTO")
+            ):
+                _validate_utc_offset(upper, raw_value, value_pos, line_pos)
             continue  # calendar-level property (PRODID, VERSION, ...); not needed yet
 
         if upper == "UID":
@@ -338,10 +456,26 @@ def parse_calendar(text: str) -> list[Event]:
         elif upper == "SUMMARY":
             current.summary = unescape_text(raw_value, value_pos)
         elif upper == "DTSTART":
+            tzid = _resolve_tzid_param("DTSTART", params, timezones)
             _validate_date_time("DTSTART", raw_value, value_pos, line_pos)
+            if tzid and raw_value.endswith("Z"):
+                p = value_pos[-1] if value_pos else line_pos[-1]
+                raise ICSParseError(
+                    "DTSTART: TZID param cannot be combined with a UTC ('Z') value",
+                    p.line,
+                    p.column,
+                )
             current.start = raw_value
         elif upper == "DTEND":
+            tzid = _resolve_tzid_param("DTEND", params, timezones)
             _validate_date_time("DTEND", raw_value, value_pos, line_pos)
+            if tzid and raw_value.endswith("Z"):
+                p = value_pos[-1] if value_pos else line_pos[-1]
+                raise ICSParseError(
+                    "DTEND: TZID param cannot be combined with a UTC ('Z') value",
+                    p.line,
+                    p.column,
+                )
             current.end = raw_value
         elif upper == "LOCATION":
             current.location = unescape_text(raw_value, value_pos)
