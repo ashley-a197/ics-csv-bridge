@@ -103,13 +103,21 @@ detects structural errors (bad property syntax, mismatched
 valid UTC offset, and a `DTSTART`/`DTEND` with a `TZID` param has to
 reference one that was actually declared. `VTIMEZONE` blocks must
 come before the events that reference them, since parsing is a single
-pass over the file. The offsets themselves aren't resolved against a
-date yet (a `DTSTART` in local time is passed through as-is), which is
-tied up with the next item below.
+pass over the file.
+
+A `DTSTART`/`DTEND` with a `TZID` param is resolved against that
+zone's actual offset for that specific date rather than passed
+through as local time: the parser walks the zone's `STANDARD`/
+`DAYLIGHT` observances (including a `YEARLY` `RRULE` with `BYMONTH`/
+`BYDAY`, e.g. "the last Sunday in October", the shape real `.ics`
+exporters use for DST rules) to find which offset was in effect, and
+the event's start/end come out as an absolute UTC value. `RRULE`
+frequencies other than `YEARLY`, and `COUNT`, aren't understood and
+are rejected rather than silently mishandled.
 
 It does not yet:
 
-- understand `RRULE` (recurring events) or `VALARM`
+- understand `RRULE` on `VEVENT` (recurring events) or `VALARM`
 
 See the commit history for what's been added since this was written.
 
